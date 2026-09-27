@@ -273,7 +273,7 @@ function ActivityReview({
   const [syncing, setSyncing] = useState(false);
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, { team: string; position: string; cost: number; length: number }>>({});
+  const [drafts, setDrafts] = useState<Record<string, { team: string; position: string; cost: number; length: number; deal: 'fa' | 'rookie'; taxi: boolean; ir: boolean }>>({});
 
   const [rosterCheck, setRosterCheck] = useState<RosterCheck | null>(null);
   const [rosterCheckError, setRosterCheckError] = useState<string | null>(null);
@@ -350,45 +350,73 @@ function ActivityReview({
       kind: 'transaction' as const,
       playerName: u.playerName,
       position: u.position,
+      isTaxi: u.isTaxi,
+      isIR: u.isIR,
       teamName: teamBySlug(u.team).name,
-      description: `On ${teamBySlug(u.team).name}'s Fleaflicker roster, no contract on file`,
+      description: `On ${teamBySlug(u.team).name}'s Fleaflicker roster${u.isTaxi ? ' (TAXI)' : u.isIR ? ' (IR)' : ''}, no contract on file`,
     }));
   const faItems = [...logItems, ...rosterItems];
   const otherItems = (activity ?? []).filter((a) => !logItems.includes(a) && a.kind !== 'drop');
   const mismatches = (rosterCheck?.mismatches ?? []).filter((m) => contracts.some((c) => c.id === m.contractId && c.team === m.sheetTeam && c.kind !== 'buyout'));
 
-  function draftFor(item: FleaflickerActivityItem) {
+  type Draft = { team: string; position: string; cost: number; length: number; deal: 'fa' | 'rookie'; taxi: boolean; ir: boolean };
+
+  function draftFor(item: FleaflickerActivityItem): Draft {
     const matchedTeam = teams.find((t) => t.name.trim().toLowerCase() === (item.teamName ?? '').trim().toLowerCase());
     return (
       drafts[item.playerName!] ?? {
         team: matchedTeam?.slug ?? teams[0].slug,
         position: POSITIONS.includes(item.position ?? '') ? item.position! : 'WR',
         cost: 1,
-        // League rule: every FA add is a 1-year deal at the winning bid.
-        length: 1,
+        // FA pickups are 1-year deals at the winning bid. A player
+        // Fleaflicker has on TAXI defaults to a rookie deal instead
+        // (3 years, flat salary, taxi-tagged) — e.g. Fernando Mendoza.
+        deal: item.isTaxi ? 'rookie' : 'fa',
+        length: item.isTaxi ? 3 : 1,
+        taxi: Boolean(item.isTaxi),
+        ir: Boolean(item.isIR),
       }
     );
   }
 
   // Takes the full item (not just the name) so the auto-matched team
-  // survives editing another field first — previously changing position
-  // or cost before touching the team dropdown silently reset team to teams[0].
-  function updateDraft(item: FleaflickerActivityItem, patch: Partial<{ team: string; position: string; cost: number; length: number }>) {
+  // survives editing another field first.
+  function updateDraft(item: FleaflickerActivityItem, patch: Partial<Draft>) {
     setDrafts({ ...drafts, [item.playerName!]: { ...draftFor(item), ...patch } });
   }
 
   async function addFromDraft(item: FleaflickerActivityItem) {
     const d = draftFor(item);
-    const newContract: Contract = {
-      id: `fa-${Date.now()}`,
-      kind: 'formula',
-      playerName: item.playerName!,
-      position: d.position,
-      team: d.team,
-      baseSalary: d.cost,
-      startYear: year,
-      lengthYears: d.length,
-    };
+    const years = Array.from({ length: d.deal === 'fa' ? 1 : d.length }, (_, i) => year + i);
+    // Rookie deals are FLAT (same salary every year — matches every taxi
+    // contract in the imported sheet: Cam Ward 2/2/2, Oscar Delp 2/2,
+    // Malachi Fields 3/3), so they're stored as explicit per-year salaries,
+    // not as a formula contract (which would escalate). Taxi/IR tags cover
+    // every contract year, same convention as the imported sheet; Sync
+    // updates the current year as players get promoted/activated.
+    const newContract: Contract =
+      d.deal === 'rookie'
+        ? {
+            id: `fa-${Date.now()}`,
+            kind: 'imported',
+            playerName: item.playerName!,
+            position: d.position,
+            team: d.team,
+            yearSalaries: Object.fromEntries(years.map((y) => [y, d.cost])),
+            ...(d.taxi ? { taxiYears: years } : {}),
+            ...(d.ir ? { irYears: years } : {}),
+          }
+        : {
+            id: `fa-${Date.now()}`,
+            kind: 'formula',
+            playerName: item.playerName!,
+            position: d.position,
+            team: d.team,
+            baseSalary: d.cost,
+            startYear: year,
+            lengthYears: 1,
+            ...(d.ir ? { irYears: [year] } : {}),
+          };
     const updated = [...contracts, newContract];
     setContracts(updated);
     // Saves immediately, same as confirmCut. Before this, adding the last
@@ -400,7 +428,7 @@ function ActivityReview({
     setSaving(false);
     setSaveMsg(
       result.ok
-        ? `${item.playerName} added and saved.`
+        ? `${item.playerName} added and saved (${d.deal === 'rookie' ? `$${d.cost}/yr × ${d.length}${d.taxi ? ', taxi' : ''}` : `$${d.cost} / 1 yr`}).`
         : `${item.playerName} added locally, but saving failed: ${result.error}. Click "Save to server" to retry — don't run Sync until this saves.`,
     );
   }
@@ -604,7 +632,7 @@ function ActivityReview({
                 ))}
               </select>
               <label className="fa-cost">
-                Won for $
+                {d.deal === 'rookie' ? 'Salary $' : 'Won for $'}
                 <input
                   type="number"
                   min={1}
@@ -613,9 +641,33 @@ function ActivityReview({
                   title="Winning bid — not tracked in Fleaflicker, enter manually"
                 />
               </label>
-              <span className="muted">1-year deal</span>
+              <select
+                value={d.deal}
+                onChange={(e) => {
+                  const deal = e.target.value as Draft['deal'];
+                  updateDraft(item, { deal, length: deal === 'fa' ? 1 : 3 });
+                }}
+              >
+                <option value="fa">FA pickup — 1 yr</option>
+                <option value="rookie">Rookie deal — flat</option>
+              </select>
+              {d.deal === 'rookie' && (
+                <select value={d.length} onChange={(e) => updateDraft(item, { length: Number(e.target.value) })}>
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n} value={n}>
+                      {n} yr
+                    </option>
+                  ))}
+                </select>
+              )}
+              <label className="fa-cost">
+                <input type="checkbox" checked={d.taxi} onChange={(e) => updateDraft(item, { taxi: e.target.checked })} /> Taxi
+              </label>
+              <label className="fa-cost">
+                <input type="checkbox" checked={d.ir} onChange={(e) => updateDraft(item, { ir: e.target.checked })} /> IR
+              </label>
               <button className="btn-primary" onClick={() => addFromDraft(item)} disabled={saving || !(d.cost >= 1)}>
-                Add ${d.cost} / 1 yr
+                {d.deal === 'rookie' ? `Add $${d.cost}/yr × ${d.length}` : `Add $${d.cost} / 1 yr`}
               </button>
             </div>
           </section>
@@ -695,6 +747,16 @@ function TeamPage({
 
   function updateContract(id: string, patch: Partial<Contract>) {
     setContracts(contracts.map((c) => (c.id === id ? ({ ...c, ...patch } as Contract) : c)));
+  }
+
+  // For contracts entered in this app by mistake (ids "fa-…"/"new-…") —
+  // removes the row outright. Not a cut: no buyout is created. Imported
+  // sheet contracts can't be deleted this way.
+  function deleteMistake(id: string) {
+    const c = contracts.find((x) => x.id === id);
+    if (!c) return;
+    if (!confirm(`Delete ${c.playerName}'s contract entirely? Use this only for an entry made by mistake — no buyout is created. Remember to Save.`)) return;
+    setContracts(contracts.filter((x) => x.id !== id));
   }
 
   function cutContract(id: string) {
@@ -809,6 +871,11 @@ function TeamPage({
                   <button className="btn-tiny btn-danger" onClick={() => cutContract(contract.id)}>
                     Cut
                   </button>
+                  {(contract.id.startsWith('fa-') || contract.id.startsWith('new-')) && contract.kind !== 'buyout' && (
+                    <button className="btn-tiny" onClick={() => deleteMistake(contract.id)} title="Remove an entry made by mistake — no buyout">
+                      Delete
+                    </button>
+                  )}
                   <select
                     className="edit-input trade-select"
                     value=""

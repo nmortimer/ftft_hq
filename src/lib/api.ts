@@ -1,4 +1,4 @@
-import type { Contract } from './contracts';
+\import type { Contract } from './contracts';
 import type { LeagueHistory } from './leagueHistory';
 
 /**
@@ -268,5 +268,24 @@ export async function fetchTopScorers(): Promise<TopScorersResult | null> {
     return body.result ?? null;
   } catch {
     return null;
+  }
+}
+
+export interface RosterCheck {
+  year: number;
+  unsigned: { playerName: string; team: string; position?: string }[];
+  mismatches: { contractId: string; playerName: string; sheetTeam: string; fleaflickerTeam: string }[];
+  notOnRoster: { contractId: string; playerName: string; sheetTeam: string }[];
+}
+
+/** Read-only roster-vs-contracts check (api/roster-check.ts). */
+export async function fetchRosterCheck(year: number): Promise<{ ok: boolean; data?: RosterCheck; error?: string }> {
+  try {
+    const res = await fetch(`/api/roster-check?year=${year}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, error: body.error || `Roster check failed (${res.status})` };
+    return { ok: true, data: body };
+  } catch {
+    return { ok: false, error: 'Could not reach the server' };
   }
 }

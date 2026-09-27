@@ -6,6 +6,8 @@ import {
   fetchFleaflickerActivity,
   fetchFleaflickerStandings,
   fetchLeagueHistory,
+  fetchRosterCheck,
+  RosterCheck,
   fetchTopScorers,
   FleaflickerActivityItem,
   FleaflickerTeamRecord,
@@ -273,6 +275,10 @@ function ActivityReview({
   const [syncError, setSyncError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, { team: string; position: string; cost: number; length: number }>>({});
 
+  const [rosterCheck, setRosterCheck] = useState<RosterCheck | null>(null);
+  const [rosterCheckError, setRosterCheckError] = useState<string | null>(null);
+  const [mmCost, setMmCost] = useState<Record<string, number>>({});
+
   useEffect(() => {
     fetchFleaflickerActivity().then((data) => {
       if (data) setActivity(data);
@@ -280,11 +286,76 @@ function ActivityReview({
     });
   }, []);
 
+  async function runRosterCheck() {
+    setRosterCheckError(null);
+    const r = await fetchRosterCheck(year);
+    if (r.ok && r.data) setRosterCheck(r.data);
+    else setRosterCheckError(r.error ?? 'Roster check failed');
+  }
+
+  // Runs on every visit to FA review — read-only, changes nothing.
+  useEffect(() => {
+    runRosterCheck();
+  }, [year]);
+
+  async function saveAndRecheck(updated: Contract[], okMsg: string) {
+    setContracts(updated);
+    setSaving(true);
+    const result = await saveContracts(updated);
+    setSaving(false);
+    setSaveMsg(result.ok ? okMsg : `Changed locally, but saving failed: ${result.error}. Click "Save to server" to retry.`);
+    if (result.ok) runRosterCheck();
+  }
+
+  // Mismatch fix 1: a real trade — same contract, new team.
+  function resolveAsTrade(m: RosterCheck['mismatches'][number]) {
+    const updated = contracts.map((c) => (c.id === m.contractId ? { ...c, team: m.fleaflickerTeam } : c));
+    saveAndRecheck(updated, `${m.playerName} moved to ${teamBySlug(m.fleaflickerTeam).name}.`);
+  }
+
+  // Mismatch fix 2: dropped by the sheet team, picked up by another —
+  // old contract becomes a buyout for the dropping team, new 1-year deal
+  // at the winning bid for the team that has him now.
+  function resolveAsDropAdd(m: RosterCheck['mismatches'][number]) {
+    const cost = mmCost[m.contractId] ?? 1;
+    const old = contracts.find((c) => c.id === m.contractId);
+    if (!old) return;
+    if (!confirm(`${m.playerName}: buy out ${teamBySlug(m.sheetTeam).name}'s contract (50% of each remaining year) and sign him to ${teamBySlug(m.fleaflickerTeam).name} at $${cost} / 1 yr?`)) return;
+    const newContract: Contract = {
+      id: `fa-${Date.now()}`,
+      kind: 'formula',
+      playerName: old.playerName,
+      position: old.position,
+      team: m.fleaflickerTeam,
+      baseSalary: cost,
+      startYear: year,
+      lengthYears: 1,
+    };
+    const updated = [...contracts.map((c) => (c.id === m.contractId ? toBuyout(c, year) : c)), newContract];
+    saveAndRecheck(updated, `${m.playerName} bought out from ${teamBySlug(m.sheetTeam).name}, signed to ${teamBySlug(m.fleaflickerTeam).name} at $${cost}.`);
+  }
+
   const findContract = (playerName: string) =>
     contracts.find((c) => normalizePlayerName(c.playerName) === normalizePlayerName(playerName) && salaryInYear(c, year) != null);
 
-  const faItems = (activity ?? []).filter((a) => a.kind === 'transaction' && a.playerName && !findContract(a.playerName));
-  const otherItems = (activity ?? []).filter((a) => !faItems.includes(a) && a.kind !== 'drop');
+  const logItems = (activity ?? []).filter((a) => a.kind === 'transaction' && a.playerName && !findContract(a.playerName));
+  // Rostered players with no contract anywhere, from the roster check —
+  // catches pickups older than the transaction log's first page.
+  const logNames = new Set(logItems.map((a) => normalizePlayerName(a.playerName!)));
+  const rosterItems: FleaflickerActivityItem[] = (rosterCheck?.unsigned ?? [])
+    .filter((u) => !logNames.has(normalizePlayerName(u.playerName)) && !findContract(u.playerName))
+    .map((u) => ({
+      raw: null,
+      timeEpochMilli: 0,
+      kind: 'transaction' as const,
+      playerName: u.playerName,
+      position: u.position,
+      teamName: teamBySlug(u.team).name,
+      description: `On ${teamBySlug(u.team).name}'s Fleaflicker roster, no contract on file`,
+    }));
+  const faItems = [...logItems, ...rosterItems];
+  const otherItems = (activity ?? []).filter((a) => !logItems.includes(a) && a.kind !== 'drop');
+  const mismatches = (rosterCheck?.mismatches ?? []).filter((m) => contracts.some((c) => c.id === m.contractId && c.team === m.sheetTeam && c.kind !== 'buyout'));
 
   function draftFor(item: FleaflickerActivityItem) {
     const matchedTeam = teams.find((t) => t.name.trim().toLowerCase() === (item.teamName ?? '').trim().toLowerCase());
@@ -352,6 +423,7 @@ function ActivityReview({
       setSyncSummary(result.summary);
       const live = await fetchContracts();
       if (live) setContracts(live);
+      runRosterCheck();
     } else {
       setSyncError(result.error ?? 'Sync failed');
     }
@@ -453,6 +525,52 @@ function ActivityReview({
         </section>
       )}
 
+
+      <section className="roster-section">
+        <h2 className="section-title">Team check</h2>
+        <p className="section-note">
+          Every Fleaflicker roster compared against the contracts on file. Runs automatically; nothing changes until you
+          click a fix.{' '}
+          <button className="btn-tiny" onClick={runRosterCheck}>
+            Re-run
+          </button>
+        </p>
+        {rosterCheckError && <p className="login-error">{rosterCheckError}</p>}
+        {rosterCheck && mismatches.length === 0 && rosterCheck.notOnRoster.length === 0 && rosterItems.length === 0 && logItems.length === 0 && (
+          <p className="muted">All 10 teams match Fleaflicker.</p>
+        )}
+        {mismatches.map((m) => (
+          <div className="add-form-row drop-row" key={m.contractId}>
+            <span>
+              <strong>{m.playerName}</strong> — sheet: {teamBySlug(m.sheetTeam).name}, Fleaflicker:{' '}
+              {teamBySlug(m.fleaflickerTeam).name}
+            </span>
+            <button className="btn-tiny" onClick={() => resolveAsTrade(m)} disabled={saving}>
+              Trade — move contract
+            </button>
+            <label className="fa-cost">
+              Won for $
+              <input
+                type="number"
+                min={1}
+                value={mmCost[m.contractId] ?? 1}
+                onChange={(e) => setMmCost({ ...mmCost, [m.contractId]: Number(e.target.value) })}
+              />
+            </label>
+            <button className="btn-tiny btn-danger" onClick={() => resolveAsDropAdd(m)} disabled={saving || !((mmCost[m.contractId] ?? 1) >= 1)}>
+              Dropped &amp; picked up — buy out + sign 1 yr
+            </button>
+          </div>
+        ))}
+        {rosterCheck && rosterCheck.notOnRoster.length > 0 && (
+          <p className="sync-line">
+            On file but not on any Fleaflicker roster:{' '}
+            {rosterCheck.notOnRoster.map((n) => `${n.playerName} (${teamBySlug(n.sheetTeam).name})`).join(', ')} — run Sync to
+            confirm cuts.
+          </p>
+        )}
+        {faItems.length > 0 && <p className="sync-line">{faItems.length} rostered player(s) with no contract — enter costs below.</p>}
+      </section>
 
       {loadError && (
         <p className="footnote">

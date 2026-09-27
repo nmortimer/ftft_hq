@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getAllContracts } from './_lib/store.js';
-import { fetchRosterMap, isActiveThisYear, normalize } from './sync.js';
+import { fetchRosterMap, fetchReserveStatusMap, isActiveThisYear, normalize } from './sync.js';
 
 /**
  * READ-ONLY team-by-team check: Fleaflicker rosters (FetchLeagueRosters,
@@ -33,14 +33,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(502).json({ error: `Only ${rosterMap.size} rostered players recognized — likely a parsing mismatch, check skipped.` });
   }
 
+  // Taxi/IR tags for unsigned players, from the same confirmed
+  // reserveChange feed Sync uses. Best-effort: if it fails, the check
+  // still runs, just without the taxi/IR defaults.
+  let reserveMap = new Map<string, { isTaxi: boolean; isIR: boolean }>();
+  try {
+    reserveMap = await fetchReserveStatusMap(leagueId);
+  } catch {}
+
   const contracts = (await getAllContracts()).filter((c) => c.kind !== 'buyout' && isActiveThisYear(c, year));
   const byName = new Map(contracts.map((c) => [normalize(c.playerName), c]));
 
-  const unsigned: { playerName: string; team: string; position?: string }[] = [];
+  const unsigned: { playerName: string; team: string; position?: string; isTaxi?: boolean; isIR?: boolean }[] = [];
   const mismatches: { contractId: string; playerName: string; sheetTeam: string; fleaflickerTeam: string }[] = [];
   for (const [key, info] of rosterMap) {
     const c = byName.get(key);
-    if (!c) unsigned.push({ playerName: info.playerName, team: info.teamSlug, position: info.position });
+    if (!c) {
+      const r = reserveMap.get(key);
+      unsigned.push({ playerName: info.playerName, team: info.teamSlug, position: info.position, isTaxi: r?.isTaxi, isIR: r?.isIR });
+    }
     else if (c.team !== info.teamSlug)
       mismatches.push({ contractId: c.id, playerName: c.playerName, sheetTeam: c.team, fleaflickerTeam: info.teamSlug });
   }

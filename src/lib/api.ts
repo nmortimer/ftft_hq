@@ -1,4 +1,4 @@
-\import type { Contract } from './contracts';
+import type { Contract } from './contracts';
 import type { LeagueHistory } from './leagueHistory';
 
 /**

@@ -89,6 +89,8 @@ export interface FleaflickerActivityItem {
   teamName?: string;
   playerName?: string;
   position?: string;
+  isTaxi?: boolean;
+  isIR?: boolean;
   transactionType?: string;
 }
 
@@ -273,7 +275,7 @@ export async function fetchTopScorers(): Promise<TopScorersResult | null> {
 
 export interface RosterCheck {
   year: number;
-  unsigned: { playerName: string; team: string; position?: string }[];
+  unsigned: { playerName: string; team: string; position?: string; isTaxi?: boolean; isIR?: boolean }[];
   mismatches: { contractId: string; playerName: string; sheetTeam: string; fleaflickerTeam: string }[];
   notOnRoster: { contractId: string; playerName: string; sheetTeam: string }[];
 }

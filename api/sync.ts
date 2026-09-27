@@ -23,8 +23,10 @@ export function normalize(s: string): string {
     .trim();
 }
 
-interface RosterInfo {
+export interface RosterInfo {
   teamSlug: string;
+  playerName: string;
+  position?: string;
 }
 
 /**
@@ -34,7 +36,7 @@ interface RosterInfo {
  * 232/232 matched once 7 spreadsheet typos were fixed. Public/anonymous
  * — no login required.
  */
-async function fetchRosterMap(leagueId: string, season: number): Promise<{ map: Map<string, RosterInfo>; rawSample: unknown }> {
+export async function fetchRosterMap(leagueId: string, season: number): Promise<{ map: Map<string, RosterInfo>; rawSample: unknown }> {
   const url = `https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id=${leagueId}&season=${season}`;
   const upstream = await fetch(url);
   if (!upstream.ok) {
@@ -53,7 +55,7 @@ async function fetchRosterMap(leagueId: string, season: number): Promise<{ map: 
     for (const player of players) {
       const playerName = player?.proPlayer?.nameFull;
       if (!playerName) continue;
-      map.set(normalize(playerName), { teamSlug: matchedTeam.slug });
+      map.set(normalize(playerName), { teamSlug: matchedTeam.slug, playerName, position: player?.proPlayer?.position ?? undefined });
     }
   }
   return { map, rawSample: rosters[0] ?? data };
@@ -137,7 +139,7 @@ export async function fetchReserveStatusMap(leagueId: string): Promise<Map<strin
   return result;
 }
 
-function isActiveThisYear(c: Contract, year: number): boolean {
+export function isActiveThisYear(c: Contract, year: number): boolean {
   if (c.kind === 'imported' || c.kind === 'buyout') return c.yearSalaries[year] != null;
   const yearsIn = year - c.startYear;
   return yearsIn >= 0 && yearsIn < c.lengthYears;
